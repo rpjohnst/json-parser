@@ -1,0 +1,6 @@
+[package]
+name = "json-parser"
+version = "0.1.0"
+authors = ["Russell Johnston <rpjohnst@gmail.com>"]
+
+[dependencies]
