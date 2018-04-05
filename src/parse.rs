@@ -63,16 +63,15 @@ impl<'source> Parse<'source> {
             Token { kind: TokenKind::Bool(bool_), .. } => self.state3(bool_),
             Token { kind: TokenKind::Null, .. } => self.state4(),
             Token { kind: TokenKind::LeftBrace, .. } => self.state5(),
-            Token { kind: TokenKind::LeftBracket, .. } => self.state16(&mut Some(())),
+            Token { kind: TokenKind::LeftBracket, .. } => self.state16(),
             _ => panic!("unexpected token {:?}", token),
         };
-        loop {
-            match nonterminal {
-                Nonterminal::Object(object) => nonterminal = self.state15(object),
-                Nonterminal::Array(array) => nonterminal = self.state23(array),
-                nonterminal => break nonterminal,
-            }
+        match nonterminal {
+            Nonterminal::Object(object) => nonterminal = self.state15(object),
+            Nonterminal::Array(array) => nonterminal = self.state23(array),
+            _ => (),
         }
+        nonterminal
     }
 
     /// S1 = value = STRING *
@@ -112,13 +111,13 @@ impl<'source> Parse<'source> {
             Token { kind: TokenKind::RightBrace, .. } => self.state14(),
             _ => panic!("unexpected token {:?}", token),
         };
-        loop {
-            match nonterminal {
-                Nonterminal::Pair(pair) => nonterminal = self.state9(pair),
-                Nonterminal::Pairs(object) => nonterminal = self.state10(object),
-                nonterminal => break nonterminal,
-            }
+        if let Nonterminal::Pair(pair) = nonterminal {
+            nonterminal = self.state9(pair);
         }
+        while let Nonterminal::Pairs(object) = nonterminal {
+            nonterminal = self.state10(object);
+        }
+        nonterminal
     }
 
     /// S6 = pair = STRING * ':' value
@@ -150,17 +149,18 @@ impl<'source> Parse<'source> {
             Token { kind: TokenKind::Bool(bool_), .. } => self.state3(bool_),
             Token { kind: TokenKind::Null, .. } => self.state4(),
             Token { kind: TokenKind::LeftBrace, .. } => self.state5(),
-            Token { kind: TokenKind::LeftBracket, .. } => self.state16(&mut Some(())),
+            Token { kind: TokenKind::LeftBracket, .. } => self.state16(),
             token => panic!("unexpected token {:?}", token),
         };
-        loop {
-            match nonterminal {
-                Nonterminal::Object(object) => nonterminal = self.state15(object),
-                Nonterminal::Array(array) => nonterminal = self.state23(array),
-                Nonterminal::Value(value) => break self.state8(string, value),
-                nonterminal => break nonterminal,
-            }
+        match nonterminal {
+            Nonterminal::Object(object) => nonterminal = self.state15(object),
+            Nonterminal::Array(array) => nonterminal = self.state23(array),
+            _ => (),
         }
+        if let Nonterminal::Value(value) = nonterminal {
+            nonterminal = self.state8(string, value);
+        }
+        nonterminal
     }
 
     /// S8 = pair = STRING ':' value *
@@ -191,17 +191,15 @@ impl<'source> Parse<'source> {
     ///      pair = * STRING ':' value
     fn state11(&mut self, object: json::Object) -> Nonterminal {
         let token = self.lex.token();
-        let nonterminal;
+        let mut nonterminal;
         nonterminal = match token {
             Token { kind: TokenKind::String(string), .. } => self.state6(string),
             token => panic!("unexpected token {:?}", token),
         };
-        loop {
-            match nonterminal {
-                Nonterminal::Pair(pair) => break self.state12(object, pair),
-                nonterminal => break nonterminal,
-            }
+        if let Nonterminal::Pair(pair) = nonterminal {
+            nonterminal = self.state12(object, pair);
         }
+        nonterminal
     }
 
     /// S12= pairs = pairs ',' pair *
@@ -242,7 +240,7 @@ impl<'source> Parse<'source> {
     ///      object = * '{' '}'
     ///      array = * '[' elements ']'
     ///      array = * '[' ']'
-    fn state16(&mut self, left_bracket: &mut Option<()>) -> Nonterminal {
+    fn state16(&mut self) -> Nonterminal {
         let token = self.lex.token();
         let mut nonterminal;
         nonterminal = match token {
@@ -251,22 +249,22 @@ impl<'source> Parse<'source> {
             Token { kind: TokenKind::Bool(bool_), .. } => self.state3(bool_),
             Token { kind: TokenKind::Null, .. } => self.state4(),
             Token { kind: TokenKind::LeftBrace, .. } => self.state5(),
-            Token { kind: TokenKind::LeftBracket, .. } => self.state16(&mut Some(())),
-            Token { kind: TokenKind::RightBracket, .. } => self.state22(left_bracket),
+            Token { kind: TokenKind::LeftBracket, .. } => self.state16(),
+            Token { kind: TokenKind::RightBracket, .. } => return self.state22(),
             token => panic!("unexpected token {:?}", token),
         };
-        loop {
-            if left_bracket.is_none() {
-                break nonterminal;
-            }
-            match nonterminal {
-                Nonterminal::Object(object) => nonterminal = self.state15(object),
-                Nonterminal::Array(array) => nonterminal = self.state23(array),
-                Nonterminal::Value(value) => nonterminal = self.state17(value),
-                Nonterminal::Elements(array) => nonterminal = self.state18(left_bracket, array),
-                nonterminal => break nonterminal,
-            }
+        match nonterminal {
+            Nonterminal::Object(object) => nonterminal = self.state15(object),
+            Nonterminal::Array(array) => nonterminal = self.state23(array),
+            _ => (),
         }
+        if let Nonterminal::Value(value) = nonterminal {
+            nonterminal = self.state17(value);
+        }
+        while let Nonterminal::Elements(array) = nonterminal {
+            nonterminal = self.state18(array);
+        }
+        nonterminal
     }
 
     /// S17= elements = value *
@@ -278,11 +276,11 @@ impl<'source> Parse<'source> {
 
     /// S18= array = '[' elements * ']'
     ///      elements = elements * ',' value
-    fn state18(&mut self, left_bracket: &mut Option<()>, array: json::Array) -> Nonterminal {
+    fn state18(&mut self, array: json::Array) -> Nonterminal {
         let token = self.lex.token();
         match token {
             Token { kind: TokenKind::Comma, .. } => self.state19(array),
-            Token { kind: TokenKind::RightBracket, .. } => { self.state21(left_bracket, array) },
+            Token { kind: TokenKind::RightBracket, .. } => { self.state21(array) },
             token => panic!("unexpected token {:?}", token),
         }
     }
@@ -307,17 +305,18 @@ impl<'source> Parse<'source> {
             Token { kind: TokenKind::Bool(bool_), .. } => self.state3(bool_),
             Token { kind: TokenKind::Null, .. } => self.state4(),
             Token { kind: TokenKind::LeftBrace, .. } => self.state5(),
-            Token { kind: TokenKind::LeftBracket, .. } => self.state16(&mut Some(())),
+            Token { kind: TokenKind::LeftBracket, .. } => self.state16(),
             token => panic!("unexpected token {:?}", token),
         };
-        loop {
-            match nonterminal {
-                Nonterminal::Object(object) => nonterminal = self.state15(object),
-                Nonterminal::Array(array) => nonterminal = self.state23(array),
-                Nonterminal::Value(value) => break self.state20(array, value),
-                nonterminal => break nonterminal,
-            }
+        match nonterminal {
+            Nonterminal::Object(object) => nonterminal = self.state15(object),
+            Nonterminal::Array(array) => nonterminal = self.state23(array),
+            _ => ()
         }
+        if let Nonterminal::Value(value) = nonterminal {
+            nonterminal = self.state20(array, value);
+        }
+        nonterminal
     }
 
     /// S20= elements = elements ',' value *
@@ -328,14 +327,12 @@ impl<'source> Parse<'source> {
     }
 
     /// S21= array = '[' elements ']' *
-    fn state21(&mut self, left_bracket: &mut Option<()>, array: json::Array) -> Nonterminal {
-        left_bracket.take().unwrap();
+    fn state21(&mut self, array: json::Array) -> Nonterminal {
         Nonterminal::Array(array)
     }
 
     /// S22= array = '[' ']' *
-    fn state22(&mut self, left_bracket: &mut Option<()>) -> Nonterminal {
-        left_bracket.take().unwrap();
+    fn state22(&mut self) -> Nonterminal {
         let array = json::Array::new();
         Nonterminal::Array(array)
     }
