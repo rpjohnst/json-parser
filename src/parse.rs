@@ -1,3 +1,4 @@
+use std::{fmt, result};
 use lex::{Lex, Token, TokenKind};
 use json;
 
@@ -5,15 +6,36 @@ use json;
 ///
 /// value = STRING | NUMBER | BOOL | NULL | object | array
 ///
-/// object = '{' pairs '}' | '{' '}'
+/// object = '{' '}'| '{' pairs '}'
 /// pairs = pair | pairs ',' pair
 /// pair = STRING ':' value
 ///
-/// array = '[' elements ']' | '[' ']'
+/// array = '[' ']' | '[' elements ']'
 /// elements = value | elements ',' value
 pub struct Parse<'source> {
     lex: Lex<'source>,
 }
+
+pub type Result<'source, T> = result::Result<T, ParseError<'source>>;
+
+/// An unexpected token.
+pub struct ParseError<'source> {
+    token: Token<'source>,
+}
+
+impl<'source> fmt::Debug for ParseError<'source> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "unexpected token {:?}", self.token)?;
+        Ok(())
+    }
+}
+
+struct Value(json::Value);
+struct Object(json::Object);
+struct Pairs(json::Object);
+struct Pair((String, json::Value));
+struct Array(json::Array);
+struct Elements(json::Array);
 
 enum Either<T, U> {
     Left(T),
@@ -30,8 +52,9 @@ impl<'source> Parse<'source> {
     }
 
     /// Parse a JSON value.
-    pub fn value(&mut self) -> Result<json::Value, ()> {
-        Ok(self.state0())
+    pub fn value(&mut self) -> Result<'source, json::Value> {
+        let Value(value) = self.goal_start()?;
+        Ok(value)
     }
 
     /// S0 = value = * STRING
@@ -44,44 +67,56 @@ impl<'source> Parse<'source> {
     ///      object = * '{' '}'
     ///      array = * '[' elements ']'
     ///      array = * '[' ']'
-    fn state0(&mut self) -> json::Value {
+    fn goal_start(&mut self) -> Result<'source, Value> {
         let token = self.lex.token();
         let value = match token {
-            Token { kind: TokenKind::String(string), .. } => self.state1(string),
-            Token { kind: TokenKind::Number(number), .. } => self.state2(number),
-            Token { kind: TokenKind::Bool(bool_), .. } => self.state3(bool_),
-            Token { kind: TokenKind::Null, .. } => self.state4(),
+            Token { kind: TokenKind::String(string), .. } => self.value_string(string)?,
+            Token { kind: TokenKind::Number(number), .. } => self.value_number(number)?,
+            Token { kind: TokenKind::Bool(bool_), .. } => self.value_bool(bool_)?,
+            Token { kind: TokenKind::Null, .. } => self.value_null()?,
             Token { kind: TokenKind::LeftBrace, .. } => {
-                let object = self.state5();
-                self.state15(object)
+                let object = self.object_open()?;
+                self.value_object(object)?
             }
             Token { kind: TokenKind::LeftBracket, .. } => {
-                let array = self.state16();
-                self.state23(array)
+                let array = self.array_open()?;
+                self.value_array(array)?
             }
-            _ => panic!("unexpected token {:?}", token),
+            _ => return Err(ParseError { token }),
         };
-        value
+        Ok(self.goal_value(value)?)
+    }
+
+    fn goal_value(&mut self, value: Value) -> Result<'source, Value> {
+        let token = self.lex.token();
+        match token {
+            Token { kind: TokenKind::End, .. } => Ok(value),
+            _ => return Err(ParseError { token }),
+        }
     }
 
     /// S1 = value = STRING *
-    fn state1(&mut self, string: String) -> json::Value {
-        json::Value::String(string)
+    fn value_string(&mut self, string: String) -> Result<'source, Value> {
+        let value = json::Value::String(string);
+        Ok(Value(value))
     }
 
     /// S2 = value = NUMBER *
-    fn state2(&mut self, number: f64) -> json::Value {
-        json::Value::Number(number)
+    fn value_number(&mut self, number: f64) -> Result<'source, Value> {
+        let value = json::Value::Number(number);
+        Ok(Value(value))
     }
 
     /// S3 = value = BOOL *
-    fn state3(&mut self, bool_: bool) -> json::Value {
-        json::Value::Bool(bool_)
+    fn value_bool(&mut self, bool_: bool) -> Result<'source, Value> {
+        let value = json::Value::Bool(bool_);
+        Ok(Value(value))
     }
 
     /// S4 = value = NULL *
-    fn state4(&mut self) -> json::Value {
-        json::Value::Null
+    fn value_null(&mut self) -> Result<'source, Value> {
+        let value = json::Value::Null;
+        Ok(Value(value))
     }
 
     /// S5 = object = '{' * pairs '}'
@@ -89,31 +124,30 @@ impl<'source> Parse<'source> {
     ///      pairs = * pair
     ///      pairs = * pairs ',' pair
     ///      pair = * STRING ':' value
-    fn state5(&mut self) -> json::Object {
+    fn object_open(&mut self) -> Result<'source, Object> {
         let token = self.lex.token();
-        let pairs = match token {
+        let mut pairs = match token {
             Token { kind: TokenKind::String(string), .. } => {
-                let pair = self.state6(string);
-                self.state9(pair)
+                let pair = self.pair_string(string)?;
+                self.pairs_pair(pair)?
             }
-            Token { kind: TokenKind::RightBrace, .. } => return self.state14(),
-            _ => panic!("unexpected token {:?}", token),
+            Token { kind: TokenKind::RightBrace, .. } => return Ok(self.object_open_close()?),
+            _ => return Err(ParseError { token }),
         };
-        let mut nonterminal = Either::Left(pairs);
         loop {
-            match nonterminal {
-                Either::Left(object) => nonterminal = self.state10(object),
-                Either::Right(object) => break object,
+            match self.object_open_pairs(pairs)? {
+                Either::Left(p) => pairs = p,
+                Either::Right(object) => return Ok(object),
             }
         }
     }
 
     /// S6 = pair = STRING * ':' value
-    fn state6(&mut self, string: String) -> (String, json::Value) {
+    fn pair_string(&mut self, string: String) -> Result<'source, Pair> {
         let token = self.lex.token();
         match token {
-            Token { kind: TokenKind::Colon, .. } => self.state7(string),
-            token => panic!("unexpected token {:?}", token),
+            Token { kind: TokenKind::Colon, .. } => Ok(self.pair_string_colon(string)?),
+            _ => return Err(ParseError { token }),
         }
     }
 
@@ -128,80 +162,94 @@ impl<'source> Parse<'source> {
     ///      object = * '{' '}'
     ///      array = * '[' elements ']'
     ///      array = * '[' ']'
-    fn state7(&mut self, string: String) -> (String, json::Value) {
+    fn pair_string_colon(&mut self, string: String) -> Result<'source, Pair> {
         let token = self.lex.token();
         let value = match token {
-            Token { kind: TokenKind::String(string), .. } => self.state1(string),
-            Token { kind: TokenKind::Number(number), .. } => self.state2(number),
-            Token { kind: TokenKind::Bool(bool_), .. } => self.state3(bool_),
-            Token { kind: TokenKind::Null, .. } => self.state4(),
+            Token { kind: TokenKind::String(string), .. } => self.value_string(string)?,
+            Token { kind: TokenKind::Number(number), .. } => self.value_number(number)?,
+            Token { kind: TokenKind::Bool(bool_), .. } => self.value_bool(bool_)?,
+            Token { kind: TokenKind::Null, .. } => self.value_null()?,
             Token { kind: TokenKind::LeftBrace, .. } => {
-                let object = self.state5();
-                self.state15(object)
+                let object = self.object_open()?;
+                self.value_object(object)?
             }
             Token { kind: TokenKind::LeftBracket, .. } => {
-                let array = self.state16();
-                self.state23(array)
+                let array = self.array_open()?;
+                self.value_array(array)?
             }
-            token => panic!("unexpected token {:?}", token),
+            _ => return Err(ParseError { token }),
         };
-        self.state8(string, value)
+        Ok(self.pair_string_colon_value(string, value)?)
     }
 
     /// S8 = pair = STRING ':' value *
-    fn state8(&mut self, string: String, value: json::Value) -> (String, json::Value) {
-        (string, value)
+    fn pair_string_colon_value(&mut self, string: String, value: Value) -> Result<'source, Pair> {
+        let Value(value) = value;
+        let pair = (string, value);
+        Ok(Pair(pair))
     }
 
     /// S9 = pairs = pair *
-    fn state9(&mut self, (string, value): (String, json::Value)) -> json::Object {
+    fn pairs_pair(&mut self, pair: Pair) -> Result<'source, Pairs> {
+        let Pair((key, value)) = pair;
         let mut object = json::Object::new();
-        object.insert(string, value);
-        object
+        object.insert(key, value);
+        Ok(Pairs(object))
     }
 
     /// S10= object = '{' pairs * '}'
     ///      pairs = pairs * ',' pair
-    fn state10(&mut self, object: json::Object) -> Either<json::Object, json::Object> {
+    fn object_open_pairs(&mut self, pairs: Pairs) -> Result<'source, Either<Pairs, Object>> {
         let token = self.lex.token();
         match token {
-            Token { kind: TokenKind::Comma, .. } => Either::Left(self.state11(object)),
-            Token { kind: TokenKind::RightBrace, .. } => Either::Right(self.state13(object)),
-            token => panic!("unexpected token {:?}", token),
+            Token { kind: TokenKind::Comma, .. } => {
+                let pairs = self.pairs_pairs_comma(pairs)?;
+                Ok(Either::Left(pairs))
+            }
+            Token { kind: TokenKind::RightBrace, .. } => {
+                let object = self.object_open_pairs_close(pairs)?;
+                Ok(Either::Right(object))
+            }
+            _ => return Err(ParseError { token }),
         }
     }
 
     /// S11= pairs = pairs ',' * pair
     ///      pair = * STRING ':' value
-    fn state11(&mut self, object: json::Object) -> json::Object {
+    fn pairs_pairs_comma(&mut self, pairs: Pairs) -> Result<'source, Pairs> {
         let token = self.lex.token();
         let pair = match token {
-            Token { kind: TokenKind::String(string), .. } => self.state6(string),
-            token => panic!("unexpected token {:?}", token),
+            Token { kind: TokenKind::String(string), .. } => self.pair_string(string)?,
+            _ => return Err(ParseError { token }),
         };
-        self.state12(object, pair)
+        Ok(self.pairs_pairs_comma_pair(pairs, pair)?)
     }
 
     /// S12= pairs = pairs ',' pair *
-    fn state12(&mut self, object: json::Object, (string, value): (String, json::Value)) -> json::Object {
-        let mut object = object;
-        object.insert(string, value);
-        object
+    fn pairs_pairs_comma_pair(&mut self, pairs: Pairs, pair: Pair) -> Result<'source, Pairs> {
+        let Pairs(mut object) = pairs;
+        let Pair((key, value)) = pair;
+        object.insert(key, value);
+        Ok(Pairs(object))
     }
 
     /// S13= object = '{' pairs '}' *
-    fn state13(&mut self, object: json::Object) -> json::Object {
-        object
+    fn object_open_pairs_close(&mut self, pairs: Pairs) -> Result<'source, Object> {
+        let Pairs(object) = pairs;
+        Ok(Object(object))
     }
 
     /// S14= object = '{' '}' *
-    fn state14(&mut self) -> json::Object {
-        json::Object::new()
+    fn object_open_close(&mut self) -> Result<'source, Object> {
+        let object = json::Object::new();
+        Ok(Object(object))
     }
 
     /// S15= value = object *
-    fn state15(&mut self, object: json::Object) -> json::Value {
-        json::Value::Object(object)
+    fn value_object(&mut self, object: Object) -> Result<'source, Value> {
+        let Object(object) = object;
+        let value = json::Value::Object(object);
+        Ok(Value(value))
     }
 
     /// S16= array = '[' * elements ']'
@@ -218,48 +266,55 @@ impl<'source> Parse<'source> {
     ///      object = * '{' '}'
     ///      array = * '[' elements ']'
     ///      array = * '[' ']'
-    fn state16(&mut self) -> json::Array {
+    fn array_open(&mut self) -> Result<'source, Array> {
         let token = self.lex.token();
         let value = match token {
-            Token { kind: TokenKind::String(string), .. } => self.state1(string),
-            Token { kind: TokenKind::Number(number), .. } => self.state2(number),
-            Token { kind: TokenKind::Bool(bool_), .. } => self.state3(bool_),
-            Token { kind: TokenKind::Null, .. } => self.state4(),
+            Token { kind: TokenKind::String(string), .. } => self.value_string(string)?,
+            Token { kind: TokenKind::Number(number), .. } => self.value_number(number)?,
+            Token { kind: TokenKind::Bool(bool_), .. } => self.value_bool(bool_)?,
+            Token { kind: TokenKind::Null, .. } => self.value_null()?,
             Token { kind: TokenKind::LeftBrace, .. } => {
-                let object = self.state5();
-                self.state15(object)
+                let object = self.object_open()?;
+                self.value_object(object)?
             }
             Token { kind: TokenKind::LeftBracket, .. } => {
-                let array = self.state16();
-                self.state23(array)
+                let array = self.array_open()?;
+                self.value_array(array)?
             }
-            Token { kind: TokenKind::RightBracket, .. } => return self.state22(),
-            token => panic!("unexpected token {:?}", token),
+            Token { kind: TokenKind::RightBracket, .. } => return Ok(self.array_open_close()?),
+            _ => return Err(ParseError { token }),
         };
-        let mut nonterminal = Either::Left(self.state17(value));
+        let mut elements = self.elements_value(value)?;
         loop {
-            match nonterminal {
-                Either::Left(array) => nonterminal = self.state18(array),
-                Either::Right(array) => break array,
+            match self.array_open_elements(elements)? {
+                Either::Left(e) => elements = e,
+                Either::Right(array) => return Ok(array),
             }
         }
     }
 
     /// S17= elements = value *
-    fn state17(&mut self, value: json::Value) -> json::Array {
+    fn elements_value(&mut self, value: Value) -> Result<'source, Elements> {
+        let Value(value) = value;
         let mut array = json::Array::new();
         array.push(value);
-        array
+        Ok(Elements(array))
     }
 
     /// S18= array = '[' elements * ']'
     ///      elements = elements * ',' value
-    fn state18(&mut self, array: json::Array) -> Either<json::Array, json::Array> {
+    fn array_open_elements(&mut self, elements: Elements) -> Result<'source, Either<Elements, Array>> {
         let token = self.lex.token();
         match token {
-            Token { kind: TokenKind::Comma, .. } => Either::Left(self.state19(array)),
-            Token { kind: TokenKind::RightBracket, .. } => Either::Right(self.state21(array)),
-            token => panic!("unexpected token {:?}", token),
+            Token { kind: TokenKind::Comma, .. } => {
+                let elements = self.elements_elements_comma(elements)?;
+                Ok(Either::Left(elements))
+            }
+            Token { kind: TokenKind::RightBracket, .. } => {
+                let array = self.array_open_elements_close(elements)?;
+                Ok(Either::Right(array))
+            }
+            _ => return Err(ParseError { token }),
         }
     }
 
@@ -274,47 +329,51 @@ impl<'source> Parse<'source> {
     ///      object = * '{' '}'
     ///      array = * '[' elements ']'
     ///      array = * '[' ']'
-    fn state19(&mut self, array: json::Array) -> json::Array {
+    fn elements_elements_comma(&mut self, elements: Elements) -> Result<'source, Elements> {
         let token = self.lex.token();
         let value = match token {
-            Token { kind: TokenKind::String(string), .. } => self.state1(string),
-            Token { kind: TokenKind::Number(number), .. } => self.state2(number),
-            Token { kind: TokenKind::Bool(bool_), .. } => self.state3(bool_),
-            Token { kind: TokenKind::Null, .. } => self.state4(),
+            Token { kind: TokenKind::String(string), .. } => self.value_string(string)?,
+            Token { kind: TokenKind::Number(number), .. } => self.value_number(number)?,
+            Token { kind: TokenKind::Bool(bool_), .. } => self.value_bool(bool_)?,
+            Token { kind: TokenKind::Null, .. } => self.value_null()?,
             Token { kind: TokenKind::LeftBrace, .. } => {
-                let object = self.state5();
-                self.state15(object)
+                let object = self.object_open()?;
+                self.value_object(object)?
             }
             Token { kind: TokenKind::LeftBracket, .. } => {
-                let array = self.state16();
-                self.state23(array)
+                let array = self.array_open()?;
+                self.value_array(array)?
             }
-            token => panic!("unexpected token {:?}", token),
+            _ => return Err(ParseError { token }),
         };
-        self.state20(array, value)
+        Ok(self.elements_elements_comma_value(elements, value)?)
     }
 
     /// S20= elements = elements ',' value *
-    fn state20(&mut self, array: json::Array, value: json::Value) -> json::Array {
-        let mut array = array;
+    fn elements_elements_comma_value(&mut self, elements: Elements, value: Value) -> Result<'source, Elements> {
+        let Elements(mut array) = elements;
+        let Value(value) = value;
         array.push(value);
-        array
+        Ok(Elements(array))
     }
 
     /// S21= array = '[' elements ']' *
-    fn state21(&mut self, array: json::Array) -> json::Array {
-        array
+    fn array_open_elements_close(&mut self, elements: Elements) -> Result<'source, Array> {
+        let Elements(array) = elements;
+        Ok(Array(array))
     }
 
     /// S22= array = '[' ']' *
-    fn state22(&mut self) -> json::Array {
+    fn array_open_close(&mut self) -> Result<'source, Array> {
         let array = json::Array::new();
-        array
+        Ok(Array(array))
     }
 
     /// S23 = value = array *
-    fn state23(&mut self, array: json::Array) -> json::Value {
-        json::Value::Array(array)
+    fn value_array(&mut self, array: Array) -> Result<'source, Value> {
+        let Array(array) = array;
+        let value = json::Value::Array(array);
+        Ok(Value(value))
     }
 }
 
